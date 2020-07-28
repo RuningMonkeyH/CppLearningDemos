@@ -7,13 +7,13 @@
                                                                                               
                   Project Name : CppLearningDemos 
                                                                                               
-                     File Name : SimpleHttpClient.h 
+                     File Name : SimpleHttpsClient.h
                                                                                               
                     Programmer : 孙宇 
                                                                                               
-                    Start Date : 2020/7/24 
+                    Start Date : 2020/7/25
                                                                                               
-                   Last Update : 2020/7/24 
+                   Last Update : 2020/7/25
                                                                                               
  *---------------------------------------------------------------------------------------------*
   Description:           

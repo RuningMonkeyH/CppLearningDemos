@@ -11,6 +11,6 @@ include_directories(/usr/local/Cellar/openssl@1.1/1.1.1d/include)
 link_directories(/Users/yshen/CodeLife/boost_1_73_0/prefix/lib)
 link_directories(/usr/local/Cellar/openssl@1.1/1.1.1d/lib)
 
-add_executable(CppLearningDemos main.cpp src/SomeTools.cpp src/SomeTools.h src/TestClazzSize.cpp src/TestClazzSize.h demos.cpp src/TestFileTemplate.cpp src/TestFileTemplate.h src/SimpleHttpClient.cpp src/SimpleHttpClient.h src/SimpleHttpClient2.cpp src/SimpleHttpClient2.h src/ROOT_CERITICATES.h)
-#使用openssl 需要link库 boost就不需要？ 不link的话会在boost中报错
-target_link_libraries(CppLearningDemos ssl crypto)
+add_executable(CppLearningDemos main.cpp src/SomeTools.cpp src/SomeTools.h src/TestClazzSize.cpp src/TestClazzSize.h demos.cpp src/TestFileTemplate.cpp src/TestFileTemplate.h src/SimpleHttpClient.cpp src/SimpleHttpClient.h src/SimpleHttpClient2.cpp src/SimpleHttpClient2.h src/ROOT_CERITICATES.h src/SimpleHttpsClient.cpp src/SimpleHttpsClient.h)
+#使用openssl 需要link如下两个库, 使用非head-only的库需要手动link
+target_link_libraries(CppLearningDemos ssl crypto boost_coroutine)

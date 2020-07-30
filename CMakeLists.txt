@@ -17,5 +17,5 @@ target_link_libraries(CppLearningDemos ssl crypto boost_coroutine)
 
 #配置多个main函数同时运行
 #servers
-add_executable(servers servers.cpp)
+add_executable(servers servers.cpp src/SimpleHttpServer.cpp src/SimpleHttpServer.h src/RequestHandler.h)
 target_link_libraries(servers ssl crypto boost_coroutine)

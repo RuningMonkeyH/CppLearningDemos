@@ -44,10 +44,10 @@ int main() {
     auto start_time = boost::get_system_time();
     std::cout << "Ready, GO!" << std::endl << std::endl;
 
-    for (int i = 0; i < 1; ++i) {
+    for (int i = 0; i < 10; ++i) {
 //        syncHttpRequest(i);
 //        asyncHttpRequest(i);
-        syncHttpsRequest();
+//        syncHttpsRequest();
 //        asyncHttpsRequest();
 //        coHttpRequest();
 //        coHttpsRequest();
@@ -208,6 +208,10 @@ void asyncHttpsRequest() {
     load_root_certificates(ctx);
 //    ctx.set_default_verify_paths();
     ctx.set_verify_mode(ssl::verify_peer);
+    /**
+     * strand提供串行执行, 能够保证线程安全, 同时被post或dispatch的方法, 不会被并发的执行.
+     * io_service不能保证线程安全
+     */
     std::make_shared<SimpleHttpsClient>(
             boost::asio::make_strand(ioc),
             ctx)->run(ssl_host, ssl_port, ssl_target, version);

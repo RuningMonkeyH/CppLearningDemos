@@ -1,5 +1,5 @@
 //
-// Created by 孙宇 on 2020/7/30.
+// Created by 孙宇 on 2020/7/31.
 //
 /***********************************************************************************************
  ***                                Y S H E N - S T U D I O S                                ***
@@ -7,17 +7,17 @@
                                                                                               
                   Project Name : CppLearningDemos 
                                                                                               
-                     File Name : SimpleHttpServer.h 
+                     File Name : SimpleHttpsServer.h 
                                                                                               
                     Programmer : 孙宇 
                                                                                               
-                    Start Date : 2020/7/30 
+                    Start Date : 2020/7/31 
                                                                                               
-                   Last Update : 2020/7/30 
+                   Last Update : 2020/7/31 
                                                                                               
  *---------------------------------------------------------------------------------------------*
   Description:           
-        简易异步Http服务端示例
+        异步https服务端示例
   
  *---------------------------------------------------------------------------------------------*
   Functions:
@@ -25,17 +25,16 @@
   Updates:
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
-#ifndef CPPLEARNINGDEMOS_SIMPLEHTTPSERVER_H
-#define CPPLEARNINGDEMOS_SIMPLEHTTPSERVER_H
+#ifndef CPPLEARNINGDEMOS_SIMPLEHTTPSSERVER_H
+#define CPPLEARNINGDEMOS_SIMPLEHTTPSSERVER_H
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
-#include <utility>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/version.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/config.hpp>
-#include "RequestHandler.h"
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -44,23 +43,30 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "RequestHandler.h"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace net = boost::asio;            // from <boost/asio.hpp>
+namespace ssl = boost::asio::ssl;       // from <boost/asio/ssl.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 /**
- * shared_from_this() 的意义
- * 需求: 在类的内部需要自身的shared_ptr 而不是this裸指针
- * 场景: 在类中发起一个异步操作, callback回来要保证发起操作的对象仍然有效.
- * 相应的，类也需要enable_shared_from_this
+ * 连续写的http和https两个类
+ * 代码除了需要包装下tcp流和握手之外几乎一样
+ * 测试的时候https这里一直出现shared_from_this弱指针报错
+ * 并且错误栈中报的是指向了http那个类的shared指针，这就很奇怪
+ * 折腾了半天，查到一个原因
+ * shared_from_this()是enable_shared_from_this<T>的成员函数，返回shared_ptr<T>;
+ * 注意的是，这个函数仅在shared_ptr<T>的构造函数被调用之后才能使用。
+ * 原因是enable_shared_from_this::weak_ptr并不在构造函数中设置，而是在shared_ptr<T>的构造函数中设置。
+ * 所以为什么没调用构造函数呢，在写继承的时候忘记加public了。晕了
  */
-class SimpleHttpServer : public std::enable_shared_from_this<SimpleHttpServer> {
+class SimpleHttpsServer : public std::enable_shared_from_this<SimpleHttpsServer> {
 private:
     struct send_lambda {
-        SimpleHttpServer &self_;
+        SimpleHttpsServer &self_;
 
-        explicit send_lambda(SimpleHttpServer &self)
+        explicit send_lambda(SimpleHttpsServer &self)
                 : self_(self) {}
 
         template<bool isRequest, class Body, class Fields>
@@ -72,116 +78,133 @@ private:
                     self_.stream_,
                     *sp,
                     beast::bind_front_handler(
-                            &SimpleHttpServer::on_write,
+                            &SimpleHttpsServer::on_write,
                             self_.shared_from_this(),
                             sp->need_eof()));
         }
     };
 
-    beast::tcp_stream stream_;
+    beast::ssl_stream<beast::tcp_stream> stream_; //前部分与http服务只相差这一个流包装
     beast::flat_buffer buffer_;
     std::shared_ptr<std::string const> doc_root_;
     http::request<http::string_body> req_;
-    std::shared_ptr<void> res_; //用void ，emmm？
+    std::shared_ptr<void> res_;
     send_lambda lambda_;
 
 public:
-    SimpleHttpServer(
+    explicit SimpleHttpsServer(
             tcp::socket &&socket,
+            ssl::context &ctx,
             std::shared_ptr<std::string const> doc_root
-    ) : stream_(std::move(socket)),
+    ) : stream_(std::move(socket), ctx),
         doc_root_(std::move(doc_root)),
         lambda_(*this) {}
 
     void run() {
-        //用strand保证线程安全
         net::dispatch(stream_.get_executor(),
                       beast::bind_front_handler(
-                              &SimpleHttpServer::do_read,
+                              &SimpleHttpsServer::on_run,
                               shared_from_this()));
     }
 
+    void on_run() {
+        beast::get_lowest_layer(stream_)
+                .expires_after(std::chrono::seconds(30));
+        //与http不同的是在开始读请求前先握手
+        stream_.async_handshake(
+                ssl::stream_base::server,
+                beast::bind_front_handler(
+                        &SimpleHttpsServer::on_handshake,
+                        shared_from_this()));
+    }
+
+    void on_handshake(beast::error_code ec) {
+        if (ec)
+            return fail(ec, "on_handshake");
+        do_read();
+    }
+
     void do_read() {
-        req_ = {};//每次读取前清空请求载体
-        //设置超时并开始读取请求
-        stream_.expires_after(std::chrono::seconds(30));
-        http::async_read(stream_,
-                         buffer_,
-                         req_,
+        //后续步骤与http相同
+        req_ = {};
+        beast::get_lowest_layer(stream_)
+                .expires_after(std::chrono::seconds(30));
+        http::async_read(stream_, buffer_, req_,
                          beast::bind_front_handler(
-                                 &SimpleHttpServer::on_read,
+                                 &SimpleHttpsServer::on_read,
                                  shared_from_this()));
     }
 
     void on_read(beast::error_code ec,
-                 std::size_t bytes_transferred) {
+                 size_t bytes_transferred) {
         boost::ignore_unused(bytes_transferred);
         if (ec == http::error::end_of_stream)
-            //连接被关闭,一般是用户端关闭了连接
             return do_close();
         if (ec)
             return fail(ec, "on_read");
-        //成功读取请求后，对请求做处理，下一步的异步处理在lambda中进行递交
         handle_request(*doc_root_, std::move(req_), lambda_);
     }
 
     void on_write(bool close,
                   beast::error_code ec,
-                  std::size_t bytes_transferred) {
+                  size_t bytes_transferred) {
         boost::ignore_unused(bytes_transferred);
         if (ec)
             return fail(ec, "on_write");
         if (close) {
-            //连接关闭，一般是响应体中有该信号
             return do_close();
         }
-        //若未关闭，清空响应体并准备接收下一次请求
         res_ = nullptr;
         do_read();
     }
 
     void do_close() {
-        beast::error_code ec;
-        //踢掉连接
-        stream_.socket().shutdown(tcp::socket::shutdown_send, ec);
+        beast::get_lowest_layer(stream_)
+                .expires_after(std::chrono::seconds(30));
+        stream_.async_shutdown(
+                beast::bind_front_handler(
+                        &SimpleHttpsServer::on_shutdown,
+                        shared_from_this()));
     }
 
+    void on_shutdown(beast::error_code ec) {
+        if (ec)
+            return fail(ec, "on_shutdown");
+    }
 };
 
-//创建acceptor监听连接并启动上面的sessions
-class SimpleHttpServerListener : public std::enable_shared_from_this<SimpleHttpServerListener> {
+class SimpleHttpsServerListener : public std::enable_shared_from_this<SimpleHttpsServerListener> {
 private:
     net::io_context &ioc_;
+    ssl::context &ctx_;
     tcp::acceptor acceptor_;
     std::shared_ptr<std::string const> doc_root_;
 public:
-    SimpleHttpServerListener(net::io_context &ioc,
-                             tcp::endpoint endpoint,
-                             std::shared_ptr<std::string const> doc_root
+    SimpleHttpsServerListener(
+            net::io_context &ioc,
+            ssl::context &ctx,
+            tcp::endpoint endpoint,
+            std::shared_ptr<std::string const> doc_root
     ) : ioc_(ioc),
-        acceptor_(net::make_strand(ioc)),
+        ctx_(ctx),
+        acceptor_(ioc),
         doc_root_(std::move(doc_root)) {
-        //监听初始化
         beast::error_code ec;
-        //开启acceptor
         acceptor_.open(endpoint.protocol(), ec);
         if (ec) {
             fail(ec, "open");
             return;
         }
-        //配置可重用
         acceptor_.set_option(net::socket_base::reuse_address(true), ec);
         if (ec) {
             fail(ec, "set_option");
             return;
         }
-        //绑定监听地址
         acceptor_.bind(endpoint, ec);
         if (ec) {
             fail(ec, "bind");
             return;
         }
-        //开始监听
         acceptor_.listen(net::socket_base::max_listen_connections, ec);
         if (ec) {
             fail(ec, "listen");
@@ -190,7 +213,7 @@ public:
     }
 
     void run() {
-        do_accept();//做接收到连接后的处理
+        do_accept();
     }
 
 private:
@@ -198,7 +221,7 @@ private:
         acceptor_.async_accept(
                 net::make_strand(ioc_),
                 beast::bind_front_handler(
-                        &SimpleHttpServerListener::on_accept,
+                        &SimpleHttpsServerListener::on_accept,
                         shared_from_this()));
     }
 
@@ -207,8 +230,9 @@ private:
         if (ec) {
             fail(ec, "accept");
         } else {
-            std::make_shared<SimpleHttpServer>(
+            std::make_shared<SimpleHttpsServer>(
                     std::move(socket),
+                    ctx_,
                     doc_root_
             )->run();
         }
@@ -217,4 +241,4 @@ private:
 };
 
 
-#endif //CPPLEARNINGDEMOS_SIMPLEHTTPSERVER_H
+#endif //CPPLEARNINGDEMOS_SIMPLEHTTPSSERVER_H

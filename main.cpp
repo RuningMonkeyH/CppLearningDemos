@@ -14,16 +14,17 @@
 #include "src/ROOT_CERITICATES.h"
 #include "src/SimpleHttpsClient.h"
 #include <boost/thread/xtime.hpp>
+#include <thread>
 //测试clion上传github
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 namespace http = boost::beast::http;    // from <boost/beast/http.hpp>
 
-auto const host = "www.boost.org";
+auto const host = "127.0.0.1";
 //auto const ssl_host = "cba.upk.net";
 auto const ssl_host = "127.0.0.1";
-auto const port = "80";
+auto const port = "8080";
 auto const ssl_port = "445";
-auto const target = "/doc/libs/1_73_0/libs/beast/doc/html/index.html";
+auto const target = "/";
 auto const ssl_target = "/";
 int version = 11;
 
@@ -44,7 +45,7 @@ int main() {
     auto start_time = boost::get_system_time();
     std::cout << "Ready, GO!" << std::endl << std::endl;
 
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 100; ++i) {
 //        syncHttpRequest(i);
 //        asyncHttpRequest(i);
 //        syncHttpsRequest();

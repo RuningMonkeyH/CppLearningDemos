@@ -18,6 +18,10 @@
  *---------------------------------------------------------------------------------------------*
   Description:           
         各Servers示例学习
+        todo 异步服务端、协程服务端
+        todo 体会各种方式的区别
+        todo 结合客户端，研究转发器写法
+        todo 调试sdk中，安卓端超出线程数后会卡死的情况
   
  *---------------------------------------------------------------------------------------------*
   Functions:
@@ -37,6 +41,7 @@
 #include <boost/asio/ssl/stream.hpp>
 #include <boost/config.hpp>
 #include "src/SimpleHttpServer.h"
+#include "src/SimpleHttpsServer.h"
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -54,17 +59,20 @@ void syncHttpsServer();
 
 void asyncHttpServer();
 
+void asyncHttpsServer();
+
 auto const address = "0.0.0.0";
 auto const port = 8080;//端口一般用unsigned short
 auto const ssl_port = 445;
 auto const root = ".";//要把工作目录配置到当前项目目录才能访问项目根目录下写的页面
+int thread_num = 1;
 
 int main() {
     //计时
     auto start_time = boost::get_system_time();
     std::cout << "Ready, GO!" << std::endl << std::endl;
 
-    syncHttpsServer();
+    asyncHttpsServer();
 
     long end_time = (boost::get_system_time() - start_time).total_milliseconds();
     std::cout << "Completed in: " << end_time << "ms" << std::endl;
@@ -136,9 +144,9 @@ void syncHttpServer() {
     try {
         net::io_context ioc{1};
         //请求接收器
-        auto address_ = net::ip::make_address(address);
-        auto port_ = static_cast<unsigned short>(port);
-        auto root_ = std::make_shared<std::string>(root);
+        auto const address_ = net::ip::make_address(address);
+        auto const port_ = static_cast<unsigned short>(port);
+        auto const root_ = std::make_shared<std::string>(root);
         tcp::acceptor acceptor{ioc, {address_, port_}};
         for (;;) {
             tcp::socket socket{ioc};
@@ -195,9 +203,9 @@ void do_ssl_session(
 //同步https服务
 void syncHttpsServer() {
     try {
-        auto address_ = net::ip::make_address(address);
-        auto port_ = static_cast<unsigned short>(ssl_port);
-        auto root_ = std::make_shared<std::string>(root);
+        auto const address_ = net::ip::make_address(address);
+        auto const port_ = static_cast<unsigned short>(ssl_port);
+        auto const root_ = std::make_shared<std::string>(root);
 
         net::io_context ioc{1};
         ssl::context ctx(ssl::context::sslv23);
@@ -231,5 +239,53 @@ void syncHttpsServer() {
 
 //异步http服务端
 void asyncHttpServer() {
+    auto const address_ = net::ip::make_address(address);
+    auto const port_ = static_cast<unsigned short>(port);
+    auto const root_ = std::make_shared<std::string>(root);
+    net::io_context ioc(thread_num);
+    std::make_shared<SimpleHttpServerListener>(
+            ioc,
+            tcp::endpoint(address_, port_),
+            root_
+    )->run();
+    //运行指定线程数的上下文
+    std::vector<std::thread> vector;
+    vector.reserve(thread_num - 1);
+    for (auto i = thread_num - 1; i > 0; --i) {
+        /**
+         * 使用emplace_back()取代push_back()
+         * push_back()函数向容器中加入一个临时对象（右值元素）时，
+         * 首先会调用构造函数生成这个对象，然后调用拷贝构造函数将这个对象放入容器中，最后释放临时对象。
+         * 但是emplace_back()函数向容器中中加入临时对象， 临时对象原地构造，不用拷贝，没有赋值或移动的操作。
+         */
+        vector.emplace_back([&ioc] {
+            ioc.run();
+        });
+    }
+    ioc.run();
+}
 
+//异步https服务
+void asyncHttpsServer() {
+    auto const address_ = net::ip::make_address(address);
+    auto const port_ = static_cast<unsigned short>(ssl_port);
+    auto const root_ = std::make_shared<std::string>(root);
+    net::io_context ioc(thread_num);
+    ssl::context ctx(ssl::context::sslv23);
+    ctx.use_certificate_chain_file("crt.crt");
+    ctx.use_private_key_file("key.key", ssl::context::file_format::pem);
+    std::make_shared<SimpleHttpsServerListener>(
+            ioc,
+            ctx,
+            tcp::endpoint(address_, port_),
+            root_
+    )->run();
+    std::vector<std::thread> vector;
+    vector.reserve(thread_num - 1);
+    for (auto i = thread_num - 1; i > 0; --i) {
+        vector.emplace_back([&ioc] {
+            ioc.run();
+        });
+    }
+    ioc.run();
 }

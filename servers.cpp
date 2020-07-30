@@ -29,8 +29,10 @@
 #include <boost/thread/xtime.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/beast/version.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/stream.hpp>
 #include <boost/config.hpp>
 #include <cstdlib>
 #include <memory>
@@ -40,13 +42,16 @@
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace net = boost::asio;            // from <boost/asio.hpp>
+namespace ssl = boost::asio::ssl;       // from <boost/asio/ssl.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 void syncHttpServer();
 
+void syncHttpsServer();
+
 auto const address = "0.0.0.0";
 auto const port = 8080;//端口一般用unsigned short
-auto const ssl_port = 443;
+auto const ssl_port = 445;
 auto const root = ".";//要把工作目录配置到当前项目目录才能访问项目根目录下写的页面
 
 int main() {
@@ -54,7 +59,7 @@ int main() {
     auto start_time = boost::get_system_time();
     std::cout << "Ready, GO!" << std::endl << std::endl;
 
-    syncHttpServer();
+    syncHttpsServer();
 
     long end_time = (boost::get_system_time() - start_time).total_milliseconds();
     std::cout << "Completed in: " << end_time << "ms" << std::endl;
@@ -252,7 +257,7 @@ void fail(beast::error_code ec, const char *what) {
     std::cerr << what << ": " << ec.message() << std::endl;
 }
 
-//发包结构体,为啥不用类呢，可能是方便做示例？
+//发包结构体,重写操作符很巧妙
 template<class Stream>
 struct send_lambda {
     Stream &stream_;
@@ -323,6 +328,7 @@ void syncHttpServer() {
         tcp::acceptor acceptor{ioc, {address_, port_}};
         for (;;) {
             tcp::socket socket{ioc};
+            //断点看这里是个阻塞，只有接收到请求才会继续进行下一步
             acceptor.accept(socket);
             std::thread(std::bind(
                     &do_session,
@@ -334,4 +340,76 @@ void syncHttpServer() {
     catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
+}
+
+//处理ssl连接,与http基本只区别于流载体和握手
+void do_ssl_session(
+        tcp::socket &socket,
+        ssl::context &ctx,
+        std::shared_ptr<std::string const> const &doc_root
+) {
+    bool close = false;
+    beast::error_code ec;
+    //封装tcp流为ssl tcp流
+    beast::ssl_stream<tcp::socket &> stream{socket, ctx};
+    //握手
+    stream.handshake(ssl::stream_base::server, ec);
+    if (ec)
+        return fail(ec, "handshake");
+    //其余步骤与http基本一致
+    beast::flat_buffer buffer;
+    send_lambda<beast::ssl_stream<tcp::socket &>> lambda{stream, close, ec};
+    for (;;) {
+        http::request<http::string_body> req;
+        http::read(stream, buffer, req, ec);
+        if (ec == http::error::end_of_stream)
+            break;
+        if (ec)
+            return fail(ec, "read");
+        handle_request(*doc_root, std::move(req), lambda);
+        if (ec)
+            return fail(ec, "write");//这里ec是通过lambda递交的
+        if (close) {
+            break;
+        }
+        stream.shutdown(ec);
+        if (ec)
+            return fail(ec, "shutdown");
+    }
+}
+
+void syncHttpsServer() {
+    try {
+        auto address_ = net::ip::make_address(address);
+        auto port_ = static_cast<unsigned short>(ssl_port);
+        auto root_ = std::make_shared<std::string>(root);
+
+        net::io_context ioc{1};
+        ssl::context ctx(ssl::context::sslv23);
+//        load_server_cerificate(ctx);//官方示例
+        //自己的证书测试
+        ctx.use_certificate_chain_file("crt.crt");
+        ctx.use_private_key_file("key.key", ssl::context::file_format::pem);
+        //接收器
+        tcp::acceptor acceptor{ioc, {address_, port_}};
+        for (;;) {
+            tcp::socket socket{ioc};
+            acceptor.accept(socket);
+            std::thread(std::bind(
+                    &do_ssl_session,
+                    std::move(socket),
+                    /**
+                     * 为什么C++11又引入了std::ref？
+                     * 主要是考虑函数式编程（如std::bind）在使用时，是对参数直接拷贝，而不是引用
+                     * 可能有一些需求，使得C++11的设计者认为默认应该采用拷贝，如果使用者有需求，加上std::ref即可
+                     */
+                    std::ref(ctx),
+                    root_
+            )).detach();
+        }
+    }
+    catch (std::exception &e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
 }

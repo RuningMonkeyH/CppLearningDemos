@@ -20,9 +20,9 @@ namespace http = boost::beast::http;    // from <boost/beast/http.hpp>
 
 auto const host = "www.boost.org";
 //auto const ssl_host = "cba.upk.net";
-auto const ssl_host = "www.digicert.com";
+auto const ssl_host = "127.0.0.1";
 auto const port = "80";
-auto const ssl_port = "443";
+auto const ssl_port = "445";
 auto const target = "/doc/libs/1_73_0/libs/beast/doc/html/index.html";
 auto const ssl_target = "/";
 int version = 11;
@@ -47,7 +47,7 @@ int main() {
     for (int i = 0; i < 1; ++i) {
 //        syncHttpRequest(i);
 //        asyncHttpRequest(i);
-//        syncHttpsRequest();
+        syncHttpsRequest();
 //        asyncHttpsRequest();
 //        coHttpRequest();
 //        coHttpsRequest();
@@ -131,14 +131,19 @@ void asyncHttpRequest(int num) {
 void syncHttpsRequest() {
     try {
         boost::asio::io_context ioc;//建立IO上下文
-        boost::asio::ssl::context ctx(boost::asio::ssl::context::tlsv12_client);//SSL上下文
-//        boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23_client);//SSL上下文
+//        boost::asio::ssl::context ctx(boost::asio::ssl::context::tlsv12_client);//SSL上下文
+        boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23_client);//SSL上下文
 
         load_root_certificates(ctx);//加载证书
-//        ctx.load_verify_file("../3583482__upk.net_apache/3583482__upk.net_chain.crt");//本地加载证书,使用代码所在路径要用 ../
-//        ctx.use_private_key_file("../3583482__upk.net_apache/3583482__upk.net.key",boost::asio::ssl::context::file_format::pem);
-//        ctx.use_certificate_chain_file("../3583482__upk.net_apache/3583482__upk.net_chain.crt");
-//        ctx.set_default_verify_paths(); //todo 所有方法里只有这个能用，为啥. 等写完异步和协程的再来看看
+        /**
+         * 证书验证失败问题以我目前的理解来看：
+         * 服务端和客户端使用的证书应该是不一样的，所以客户端不能使用服务端证书来请求
+         * 在证书无效的情况下，用任意格式正确的客户端证书都能够发起请求
+         * 客户端理论上不验证证书也是可以的
+         */
+//        ctx.load_verify_file("../crt.crt");//本地加载证书,使用代码所在路径要用 ../
+//        ctx.use_private_key_file("../key.key",boost::asio::ssl::context::file_format::pem);
+//        ctx.use_certificate_chain_file("3583482__upk.net_nginx/3583482__upk.net.pem");
 //        ctx.add_verify_path("../3583482__upk.net_nginx/");
 
         ctx.set_verify_mode(boost::asio::ssl::verify_peer);

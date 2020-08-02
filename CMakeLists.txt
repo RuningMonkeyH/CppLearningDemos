@@ -19,3 +19,7 @@ target_link_libraries(CppLearningDemos ssl crypto boost_coroutine)
 #servers
 add_executable(servers servers.cpp src/SimpleHttpServer.cpp src/SimpleHttpServer.h src/RequestHandler.h src/SimpleHttpsServer.cpp src/SimpleHttpsServer.h)
 target_link_libraries(servers ssl crypto boost_coroutine)
+
+#转发
+add_executable(forwarder forwarder.cpp)
+target_link_libraries(forwarder ssl crypto boost_coroutine)

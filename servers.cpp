@@ -13,13 +13,11 @@
                                                                                               
                     Start Date : 2020/7/28 
                                                                                               
-                   Last Update : 2020/7/30
+                   Last Update : 2020/8/3
                                                                                               
  *---------------------------------------------------------------------------------------------*
   Description:           
         各Servers示例学习
-        todo 异步服务端、协程服务端
-        todo 体会各种方式的区别
         todo 结合客户端，研究转发器写法
         todo 调试sdk中，安卓端超出线程数后会卡死的情况
   
@@ -39,6 +37,7 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/ssl/stream.hpp>
+#include <boost/asio/spawn.hpp>
 #include <boost/config.hpp>
 #include "src/SimpleHttpServer.h"
 #include "src/SimpleHttpsServer.h"
@@ -61,6 +60,10 @@ void asyncHttpServer();
 
 void asyncHttpsServer();
 
+void coroHttpServer();
+
+void coroHttpsServer();
+
 auto const address = "0.0.0.0";
 auto const port = 8080;//端口一般用unsigned short
 auto const ssl_port = 445;
@@ -72,7 +75,7 @@ int main() {
     auto start_time = boost::get_system_time();
     std::cout << "Ready, GO!" << std::endl << std::endl;
 
-    asyncHttpsServer();
+    coroHttpsServer();
 
     long end_time = (boost::get_system_time() - start_time).total_milliseconds();
     std::cout << "Completed in: " << end_time << "ms" << std::endl;
@@ -287,5 +290,298 @@ void asyncHttpsServer() {
             ioc.run();
         });
     }
+    ioc.run();
+}
+
+/**
+ * 协程http服务端
+ */
+//要增加一个传递yield的位置
+struct coro_send_lambda {
+    beast::tcp_stream &stream_;
+    bool &close_;
+    beast::error_code &ec_;
+    net::yield_context yield_;
+
+    coro_send_lambda(
+            beast::tcp_stream &stream,
+            bool &close,
+            beast::error_code &ec,
+            net::yield_context yield
+    ) : stream_(stream),
+        close_(close),
+        ec_(ec),
+        yield_(yield) {}
+
+    template<bool isRequest, class Body, class Fields>
+    void operator()(http::message<isRequest, Body, Fields> &&msg) {
+        close_ = msg.need_eof();
+        http::serializer<isRequest, Body, Fields> sr{msg};
+        //回复响应
+        http::async_write(stream_, sr, yield_[ec_]);
+    }
+};
+
+//处理会话
+void coro_do_session(
+        beast::tcp_stream &stream,
+        std::shared_ptr<std::string const> const &doc_root,
+        net::yield_context yield
+) {
+    bool close = false;
+    beast::error_code ec;
+
+    beast::flat_buffer buffer;
+    //这里yield传递时，ide推荐用std::move，但官方没有这样用，还需要思考下
+    coro_send_lambda lambda{stream, close, ec, yield};
+    for (;;) {
+        //读请求
+        stream.expires_after(std::chrono::seconds(30));
+        http::request<http::string_body> req;
+        http::async_read(stream, buffer, req, yield[ec]);
+        if (ec == http::error::end_of_stream)
+            //一般这里是由于客户端突然关闭
+            break;
+        if (ec)
+            return fail(ec, "read");
+        //处理请求，用结构体递交参数
+        handle_request(*doc_root, std::move(req), lambda);
+        if (ec)
+            return fail(ec, "write");
+        if (close) {
+            //一般是请求完成，一段时间后没有继续请求，跳出循环踢掉客户端连接
+            break;
+        }
+    }
+    stream.socket().shutdown(tcp::socket::shutdown_send, ec);
+}
+
+//监听本地端口，加载会话
+void coro_do_listen(
+        net::io_context &ioc,
+        tcp::endpoint endpoint,
+        std::shared_ptr<std::string const> const &doc_root,
+        net::yield_context yield
+) {
+    beast::error_code ec;
+    //打开监听器
+    tcp::acceptor acceptor(ioc);
+    acceptor.open(endpoint.protocol(), ec);//一般是ipv4协议
+    if (ec)
+        return fail(ec, "open");
+    acceptor.set_option(net::socket_base::reuse_address(true), ec);
+    if (ec)
+        return fail(ec, "set_option");
+    //绑定地址及端口
+    acceptor.bind(endpoint, ec);
+    if (ec)
+        return fail(ec, "bind");
+    //开始监听
+    acceptor.listen(net::socket_base::max_listen_connections, ec);
+    if (ec)
+        return fail(ec, "listen");
+    for (;;) {
+        tcp::socket socket(ioc);
+        acceptor.async_accept(socket, yield[ec]);
+        if (ec)
+            fail(ec, "accept");
+        else
+            //开启协程处理会话
+            boost::asio::spawn(
+                    acceptor.get_executor(),
+                    std::bind(
+                            &coro_do_session,
+                            beast::tcp_stream(std::move(socket)),
+                            doc_root,
+                            std::placeholders::_1));
+    }
+}
+
+//协程http服务
+void coroHttpServer() {
+    auto const address_ = net::ip::make_address(address);
+    auto const port_ = static_cast<unsigned short>(port);
+    auto const root_ = std::make_shared<std::string>(root);
+
+    net::io_context ioc{thread_num};
+    //开启协程监听端口
+    boost::asio::spawn(
+            ioc,
+            std::bind(
+                    &coro_do_listen,
+                    std::ref(ioc),
+                    tcp::endpoint(address_, port_),
+                    root_,
+                    std::placeholders::_1));
+    //设置开启线程数
+    std::vector<std::thread> vector;
+    vector.reserve(thread_num - 1);
+    for (auto i = thread_num - 1; i > 0; --i)
+        /**
+         * 使用emplace_back()取代push_back()
+         * push_back()函数向容器中加入一个临时对象（右值元素）时，
+         * 首先会调用构造函数生成这个对象，然后调用拷贝构造函数将这个对象放入容器中，最后释放临时对象。
+         * 但是emplace_back()函数向容器中中加入临时对象， 临时对象原地构造，不用拷贝，没有赋值或移动的操作。
+         */
+        vector.emplace_back([&ioc] {
+            ioc.run();
+        });
+    ioc.run();
+}
+
+//ssl发包体，与普通区别为stream的ssl包装
+struct coro_send_ssl_lambda {
+    beast::ssl_stream<beast::tcp_stream> &stream_;
+    bool &close_;
+    beast::error_code &ec_;
+    net::yield_context yield_;
+
+    coro_send_ssl_lambda(
+            beast::ssl_stream<beast::tcp_stream> &stream,
+            bool &close,
+            beast::error_code &ec,
+            net::yield_context yield)
+            : stream_(stream),
+              close_(close),
+              ec_(ec),
+              yield_(yield) {
+    }
+
+    template<bool isRequest, class Body, class Fields>
+    void
+    operator()(http::message<isRequest, Body, Fields> &&msg) const {
+        // 需要关闭时关闭
+        close_ = msg.need_eof();
+
+        //回复响应
+        http::serializer<isRequest, Body, Fields> sr{msg};
+        http::async_write(stream_, sr, yield_[ec_]);
+    }
+};
+
+//处理ssl会话
+void coro_do_ssl_session(
+        beast::ssl_stream<beast::tcp_stream> &stream,
+        std::shared_ptr<std::string const> const &doc_root,
+        net::yield_context yield
+) {
+    bool close = false;
+    beast::error_code ec;
+    //设置超时
+    beast::get_lowest_layer(stream)
+            .expires_after(std::chrono::seconds(30));
+    //与普通http区别就是读请求前先握手
+    stream.async_handshake(ssl::stream_base::server, yield[ec]);
+    if (ec)
+        return fail(ec, "handshake");
+    //用于接收请求
+    beast::flat_buffer buffer;
+    //初始化发包结构体
+    coro_send_ssl_lambda lambda(stream, close, ec, yield);
+
+    for (;;) {
+        //设置超时
+        beast::get_lowest_layer(stream)
+                .expires_after(std::chrono::seconds(30));
+        //读请求
+        http::request<http::string_body> req;
+        http::async_read(stream, buffer, req, yield[ec]);
+        if (ec == http::error::end_of_stream)
+            //这个错误一般是客户端突然关闭了请求
+            break;
+        if (ec)
+            return fail(ec, "read");
+        //处理请求，使用结构体递交相关参数
+        handle_request(*doc_root, std::move(req), lambda);
+        if (ec)
+            return fail(ec, "write");
+        if (close) {
+            //跳出循环，踢掉客户端连接
+            break;
+        }
+    }
+    beast::get_lowest_layer(stream)
+            .expires_after(std::chrono::seconds(30));
+    stream.async_shutdown(yield[ec]);
+    if (ec)
+        return fail(ec, "shutdown");
+}
+
+//监听ssl端口
+void coro_do_ssl_listen(
+        net::io_context &ioc,
+        ssl::context &ctx,
+        tcp::endpoint endpoint,
+        std::shared_ptr<std::string const> const &doc_root,
+        net::yield_context yield
+) {
+    beast::error_code ec;
+    //打开监听器
+    tcp::acceptor acceptor(ioc);
+    acceptor.open(endpoint.protocol(), ec);//一般是ipv4协议
+    if (ec)
+        return fail(ec, "open");
+    acceptor.set_option(net::socket_base::reuse_address(true), ec);
+    if (ec)
+        return fail(ec, "set_option");
+    //绑定地址及端口
+    acceptor.bind(endpoint, ec);
+    if (ec)
+        return fail(ec, "bind");
+    //开始监听
+    acceptor.listen(net::socket_base::max_listen_connections, ec);
+    if (ec)
+        return fail(ec, "listen");
+    for (;;) {
+        tcp::socket socket(ioc);
+        acceptor.async_accept(socket, yield[ec]);
+        if (ec)
+            fail(ec, "accept");
+        else
+            //开启协程处理会话
+            boost::asio::spawn(
+                    acceptor.get_executor(),
+                    std::bind(
+                            &coro_do_ssl_session,
+                            beast::ssl_stream<beast::tcp_stream>(std::move(socket), ctx),
+                            doc_root,
+                            std::placeholders::_1));
+    }
+}
+
+//协程https服务
+void coroHttpsServer() {
+    auto const address_ = net::ip::make_address(address);
+    auto const port_ = static_cast<unsigned short>(ssl_port);
+    auto const root_ = std::make_shared<std::string>(root);
+    //创建io及ssl上下文
+    net::io_context ioc{thread_num};
+    ssl::context ctx{ssl::context::sslv23};
+    //设置使用的证书
+    ctx.use_certificate_chain_file("crt.crt");
+    ctx.use_private_key_file("key.key", ssl::context::file_format::pem);
+    //开启协程监听端口
+    boost::asio::spawn(
+            ioc,
+            std::bind(
+                    &coro_do_ssl_listen,
+                    std::ref(ioc),
+                    std::ref(ctx),
+                    tcp::endpoint(address_, port_),
+                    root_,
+                    std::placeholders::_1));
+    //设置开启线程数
+    std::vector<std::thread> vector;
+    vector.reserve(thread_num - 1);
+    for (auto i = thread_num - 1; i > 0; --i)
+        /**
+         * 使用emplace_back()取代push_back()
+         * push_back()函数向容器中加入一个临时对象（右值元素）时，
+         * 首先会调用构造函数生成这个对象，然后调用拷贝构造函数将这个对象放入容器中，最后释放临时对象。
+         * 但是emplace_back()函数向容器中中加入临时对象， 临时对象原地构造，不用拷贝，没有赋值或移动的操作。
+         */
+        vector.emplace_back([&ioc] {
+            ioc.run();
+        });
     ioc.run();
 }
